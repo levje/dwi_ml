@@ -93,6 +93,26 @@ def init_from_args(args, sub_loggers_level):
         logging.info("Loader user-defined parameters: " +
                      format_dict_to_str(batch_loader.params_for_checkpoint))
 
+    # That scheduler config was taken directly from https://github.com/scil-vital/tractolearn/blob/main/tractolearn/learning/trainer_manager.py#L105
+    # at the moment. We should maybe see that this can be provided externally (i.e. in a config file)?
+    scheduler_config = {
+        "scheduler": 'OneCycleLR',
+        "params": {
+            "max_lr": 0.001,
+            "total_steps": None,
+            "epochs": args.max_epochs,
+            "steps_per_epoch": 100,  # TODO: What should be this value?
+            "pct_start": 0.3,
+            "anneal_strategy": "cos",
+            "cycle_momentum": True,
+            "base_momentum": 0.85,
+            "max_momentum": 0.95,
+            "div_factor": 25.0,
+            "final_div_factor": 10000.0,
+            "last_epoch": -1
+        }
+    }
+
     # Instantiate trainer
     with Timer("\n\nPreparing trainer", newline=True, color='red'):
         lr = format_lr(args.learning_rate)
@@ -105,13 +125,14 @@ def init_from_args(args, sub_loggers_level):
             comet_workspace=args.comet_workspace,
             # TRAINING
             learning_rates=lr, weight_decay=args.weight_decay,
-            optimizer=args.optimizer, max_epochs=args.max_epochs,
+            optimizer=args.optimizer, scheduler_config=scheduler_config,
+            max_epochs=args.max_epochs,
             max_batches_per_epoch_training=args.max_batches_per_epoch_training,
             max_batches_per_epoch_validation=args.max_batches_per_epoch_validation,
             patience=args.patience, patience_delta=args.patience_delta,
             from_checkpoint=False, clip_grad=args.clip_grad,
             # MEMORY
-            nb_cpu_processes=args.nbr_processes, use_gpu=args.use_gpu,
+            nb_cpu_processes=args.nbr_processes, use_gpu=True,
             log_level=sub_loggers_level)
         logging.info("Trainer params : " +
                      format_dict_to_str(trainer.params_for_checkpoint))

@@ -56,7 +56,8 @@ class DWIMLAbstractTrainer:
                  batch_loader: DWIMLStreamlinesBatchLoader,
                  learning_rates: Union[List, float] = None,
                  weight_decay: float = 0.01,
-                 optimizer: str = 'Adam', max_epochs: int = 10,
+                 optimizer: str = 'Adam', scheduler_config: dict = None,
+                 max_epochs: int = 10,
                  max_batches_per_epoch_training: int = 1000,
                  max_batches_per_epoch_validation: Union[int, None] = 1000,
                  patience: int = None, patience_delta: float = 1e-6,
@@ -93,6 +94,15 @@ class DWIMLAbstractTrainer:
         optimizer: str
             Torch optimizer choice. Current available options are SGD, Adam or
             RAdam.
+        scheduler_config: dict
+            Configuration for the learning rate scheduler. If None, no scheduler
+            will be used. Default: None.
+
+            The dictionary should contain the following structure:
+            {
+                'scheduler': <name_of_the_scheduler as str (OneCycleLR, StepLR, ...)>,
+                'params': <params_for_the_scheduler (dict)>
+            }
         max_epochs: int
             Maximum number of epochs. Default = 10, for no good reason.
         max_batches_per_epoch_training: int
@@ -218,6 +228,12 @@ class DWIMLAbstractTrainer:
         if optimizer not in ['SGD', 'Adam', 'RAdam']:
             raise ValueError("Optimizer choice {} not recognized."
                              .format(optimizer))
+        if scheduler_config is not None \
+            and isinstance(learning_rates, list) \
+            and len(learning_rates) > 1:
+            raise ValueError("Several learning rates and a scheduler are not "
+                             "compatible. Please use a scheduler with a single "
+                             "initial learning rate value.") 
 
         # ----------------
         # Create DataLoaders from the BatchSamplers
@@ -335,6 +351,23 @@ class DWIMLAbstractTrainer:
         # Learning rate will be set at each epoch.
         self.optimizer = cls(self.model.parameters(),
                              weight_decay=weight_decay)
+        
+        # Build scheduler
+        if scheduler_config is not None:
+            scheduler_cls = getattr(torch.optim.lr_scheduler, scheduler_config['scheduler'])
+            self.scheduler = scheduler_cls(self.optimizer, **scheduler_config['params'])
+            self.lr_scheduling_enabled = True
+            # According to PyTorch's documentation, some learning rate schedulers
+            # should be called at each batch while other should be called at each
+            # epoch after validation.
+            self.scheduler_update_each_batch = \
+                scheduler_cls == torch.optim.lr_scheduler.OneCycleLR \
+                or scheduler_cls == torch.optim.lr_scheduler.CyclicLR \
+                or scheduler_cls == torch.optim.lr_scheduler.CosineAnnealingWarmRestarts
+        else:
+            # No scheduler provided. Just use a schedule that does nothing.
+            self.scheduler = None
+            self.scheduler_update_each_batch = False
 
     @property
     def params_for_checkpoint(self):
@@ -667,9 +700,13 @@ class DWIMLAbstractTrainer:
                         .format(epoch, epoch + 1))
 
             # Computing learning rate
-            current_lr = self.learning_rates[
-                min(self.current_epoch, len(self.learning_rates) - 1)]
-            logger.info("Learning rate = {}".format(current_lr))
+            if self.scheduler is None:
+                current_lr = self.learning_rates[
+                    min(self.current_epoch, len(self.learning_rates) - 1)]
+            else:
+                current_lr = self.scheduler.get_last_lr()[0]
+
+            logger.info("Learning rate = {:.2E}".format(current_lr))
             if self.comet_exp:
                 self.comet_exp.log_metric("learning_rate", current_lr,
                                           step=epoch)
@@ -685,6 +722,12 @@ class DWIMLAbstractTrainer:
             if self.use_validation:
                 logger.info("*** VALIDATION")
                 self.validate_one_epoch(epoch)
+
+            if self.scheduler is not None and not self.scheduler_update_each_batch:
+                # According to PyTorch's documentation, most learning rate
+                # schedulers that aren't updated each batch step should be
+                # updated after the validation step.
+                self.scheduler.step()
 
             # Updating info
             mean_epoch_loss = self._get_latest_loss_to_supervise_best()
@@ -823,6 +866,9 @@ class DWIMLAbstractTrainer:
                     mean_loss)
                 self.unclipped_grad_norm_monitor.update(unclipped_grad_norm)
                 self.grad_norm_monitor.update(grad_norm)
+
+                if self.scheduler is not None and self.scheduler_update_each_batch:
+                    self.scheduler.step()
 
                 # Break if maximum number of batches has been reached
                 if batch_id == self.nb_batches_train - 1:
